@@ -1,0 +1,14 @@
+apiVersion: triggers.tekton.dev/v1beta1
+kind: EventListener
+metadata:
+  name: frontend-event-listener
+  labels:
+    app.openshift.io/runtime: git
+    maistra.io/expose-route: 'true'
+  annotations:
+    haproxy.router.openshift.io/timeout: 240s
+spec:
+  serviceAccountName: pipeline
+  triggers:
+    - triggerRef: frontend-build-trigger
+    - triggerRef: frontend-promote-trigger
