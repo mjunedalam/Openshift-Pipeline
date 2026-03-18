@@ -1,0 +1,34 @@
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: set-frontend-parameters-task
+spec:
+  description: This Task can be used to set parameters for the frontend task
+  params:
+    - description: Branch Name
+      name: BRANCH_NAME
+      type: string
+  results:
+    - name: image-tag
+      description: string used for image tag
+    - name: fortify-project-name
+      description: fortify project name
+    - name: frontend-project-name
+      description: frontend project name
+    - name: nexus-iq-project-name
+      description: nexus iq project name
+  steps:
+    - image: registry.redhat.io/ubi8/ubi-minimal:8.10
+      name: set-parameters
+      resources: {}
+      script: >
+        #!/usr/bin/env bash
+         cd $(workspaces.source.path)
+         sed 's/.*"fortifyProjectName": "\(.*\)".*/\1/;t;d' package.json | tr -d '\n' > "$(results.fortify-project-name.path)"
+         sed 's/.*"nexusIQProjectName": "\(.*\)".*/\1/;t;d' package.json | tr -d '\n' > "$(results.nexus-iq-project-name.path)"
+         sed 's/.*"name": "\(.*\)".*/\1/;t;d' package.json | tr -d '\n'  > "$(results.frontend-project-name.path)"
+         sed 's/.*"version": "\(.*\)".*/\1/;t;d' package.json  | tr -d '\n' > "$(results.image-tag.path)"         
+         sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"$(cat $(results.image-tag.path))\"/" ./src/app/application-properties.json
+  workspaces:
+    - description: The workspace consisting of nodejs project.
+      name: source
