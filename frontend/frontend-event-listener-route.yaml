@@ -1,0 +1,20 @@
+kind: Route
+apiVersion: route.openshift.io/v1
+metadata:
+  name: frontend-event-listener-route
+  labels:
+    app.kubernetes.io/managed-by: EventListener
+    app.kubernetes.io/part-of: Triggers
+    eventlistener: frontend-event-listener
+spec:
+  host: frontend-event-listener-easd-agwa-pipeline.apps.ocpb.enp.aramco.com.sa
+  to:
+    kind: Service
+    name: el-frontend-event-listener
+    weight: 100
+  port:
+    targetPort: http-listener
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Allow
+  wildcardPolicy: None
