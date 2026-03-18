@@ -1,0 +1,249 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: git-cli
+spec:
+  description: "Git CLI Task that supports cloning, checking out or creating a branch, running optional scripts, committing, pushing, and optionally opening a PR."
+  params:
+    - name: url
+      type: string
+      description: Git repository URL (SSH or HTTPS).
+    - name: revision
+      type: string
+      default: "master"
+      description: Branch, tag, or SHA to checkout.
+    - name: new-branch
+      type: string
+      default: ""
+      description: Optional. If provided, creates and checks out this new branch.
+    - name: git-script
+      type: string
+      description: Optional shell script to run in the repo after checkout.
+    - name: auto-commit
+      type: string
+      default: "true"
+      description: If "true", automatically commits changes made by the script.
+    - name: commit-message
+      type: string
+      default: "updated image tag"
+      description: Commit message to use if auto-commit is enabled.
+    - name: push
+      type: string
+      default: "true"
+      description: If "true", pushes changes to the remote.
+    - name: pr-title
+      type: string
+      default: "Production move request"
+      description: Title of the pull request.
+    - name: git-user
+      type: string
+      default: "G-DH-COINS"
+      description: Git user.name to configure.
+    - name: git-email
+      type: string
+      default: "G-DH-COINS@Exchange.Aramco.com.sa"
+      description: Git user.email to configure.
+    - default: resources
+      description: Subdirectory inside the `output` Workspace to clone the repo into.
+      name: subdirectory
+      type: string
+    - default: 'true'
+      description: Log the commands that are executed during `git-clone`'s operation.
+      name: verbose
+      type: string
+    - default: 'true'
+      description: Clean out the contents of the destination directory if it already exists before cloning.
+      name: deleteExisting
+      type: string
+  workspaces:
+    - name: output
+      description: The workspace to clone the git repo into.
+
+  steps:
+    - name: git
+      image: 'registry.redhat.io/openshift-pipelines/pipelines-git-init-rhel8:v1.17.2'
+      script: |
+        #!/usr/bin/env sh
+        set -eu
+
+        if [ "$(params.verbose)" = "true" ] ; then
+          set -x
+        fi
+
+        #add the repo host to list of known hosts, this is important for SSH auth
+        cd home/git/
+        mkdir -p .ssh
+        ssh-keyscan -t rsa eccdevops.enp.aramco.com.sa > ~/.ssh/known_hosts
+        cd "$(workspaces.output.path)"
+
+        #create resources folder if not created already
+        mkdir -p "$(params.subdirectory)"
+        CHECKOUT_DIR="$(workspaces.output.path)/$(params.subdirectory)"
+
+        cleandir() {
+          # Delete any existing contents of the repo directory if it exists.
+          #
+          # We don't just "rm -rf ${CHECKOUT_DIR}" because ${CHECKOUT_DIR} might be "/"
+          # or the root of a mounted volume.
+          if [ -d "${CHECKOUT_DIR}" ] ; then
+            # Delete non-hidden files and directories
+            rm -rf "${CHECKOUT_DIR:?}"/*
+            # Delete files and directories starting with . but excluding ..
+            rm -rf "${CHECKOUT_DIR}"/.[!.]*
+            # Delete files and directories starting with .. plus any other character
+            rm -rf "${CHECKOUT_DIR}"/..?*
+          fi
+        }
+
+        if [ "$(params.deleteExisting)" = "true" ] ; then
+          cleandir || true
+        fi
+
+        cd "${CHECKOUT_DIR}"
+
+        git config --global --add safe.directory "$(workspaces.output.path)"
+        git config --global user.email "$(params.git-email)"
+        git config --global user.name "$(params.git-user)"
+
+        echo "[INFO] Cloning $(params.url) at revision $(params.revision)"
+        git clone -b "$(params.revision)" "$(params.url)"
+
+        REPO_DIR="$(basename "$(params.url)")"
+        echo "[INFO] REPO DIR is $REPO_DIR"
+        if [ -n "$(params.new-branch)" ]; then
+          cd "${REPO_DIR}"
+          echo "[INFO] Creating and switching to new branch: $(params.new-branch)"
+          git checkout -b "$(params.new-branch)"
+        fi
+
+        echo "[INFO] Running custom script..."
+        eval '$(params.git-script)'
+
+        if [ "$(params.auto-commit)" = "true" ]; then
+          echo "[INFO] Committing changes"
+          git add .
+          git commit --allow-empty -m "$(params.commit-message)"
+        fi
+
+        if [ "$(params.push)" = "true" ]; then
+          echo "[INFO] Pushing to remote"
+          if [ -n "$(params.new-branch)" ]; then
+           if git pull --rebase origin "$(params.new-branch)" 2>&1 | grep -q "CONFLICT"; then
+              echo "[ERROR] Pull failed due to conflicts"
+              exit 1 
+           fi
+              git push -u origin "$(params.new-branch)"
+          else
+            git push origin "$(params.revision)"
+          fi
+        fi
+
+        RESULT_SHA="$(git rev-parse HEAD)"
+        printf "%s" "$RESULT_SHA" > "$(results.commit.path)"
+        printf "%s" "$(git log -1 --pretty=%ct)" > "$(results.committer-date.path)"
+
+    - name: create-pr
+      when:
+        - input: $(params.revision)
+          operator: in
+          values: [ "master" ]
+      image: quay.io/curl/curl:latest
+      env:
+        - name: AZURE_DEVOPS_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: azure-devops-pullrequests-token
+              key: azure-personal-token
+      script: |
+        #!/bin/sh
+        set -eu
+
+        if [ -z "$(params.new-branch)" ]; then
+          echo "[INFO] Skipping PR creation (new-branch is empty)."
+          exit 0
+        fi
+
+        URL="$(params.url)"
+
+        # Only support ssh://host:port/collection/project/_git/repo
+        if ! echo "$URL" | grep -qE '^ssh://'; then
+          echo "[ERROR] Only SSH URLs are supported. Expected: ssh://host:port/collection/project/_git/repo"
+          exit 1
+        fi
+
+        HOST="$(echo "$URL" | sed -E 's#^ssh://([^/:]+).*$#\1#')"
+        PATH_PART="$(echo "$URL" | sed -E 's#^ssh://[^/]+/##')"
+
+        COLLECTION="$(echo "$PATH_PART" | cut -d'/' -f1)"
+        PROJECT="$(echo "$PATH_PART" | cut -d'/' -f2)"
+        REPO="$(echo "$PATH_PART" | awk -F'/_git/' '{print $2}' | sed 's#\.git$##')"
+
+        if [ -z "$COLLECTION" ] || [ -z "$PROJECT" ] || [ -z "$REPO" ]; then
+          echo "[ERROR] Could not parse SSH URL. Expected: ssh://host:port/collection/project/_git/repo"
+          echo "[ERROR] Got: $URL"
+          exit 1
+        fi
+
+        PR_API_URL="https://${HOST}/${COLLECTION}/${PROJECT}/_apis/git/repositories/${REPO}/pullrequests?api-version=5.0"
+
+        echo "[INFO] Creating PR from $(params.new-branch) to $(params.revision)"
+        echo "[INFO] PR API URL: $PR_API_URL"
+
+        JSON_PAYLOAD="$(cat <<EOF
+        {
+          "sourceRefName": "refs/heads/$(params.new-branch)",
+          "targetRefName": "refs/heads/$(params.revision)",
+          "title": "$(params.pr-title)",
+          "description": "$(params.pr-title)",
+          "isDraft": false,
+          "reviewers": [
+             {
+              "isRequired": false,
+              "id": "4daacfac-c94a-4e33-94d6-4f40c31ff83c"
+            },
+            {
+              "isRequired": false,
+              "id": "0b1152d0-0464-4506-9590-ce6202b1f597"
+            },
+        ]
+        }
+        EOF
+        )"
+
+        echo "[INFO] Payload:"
+        echo "$JSON_PAYLOAD"
+
+        # Send request, capture body + status code
+        HTTP_CODE="$(curl -sS -k \
+          -H "Authorization: Basic $(echo -n ":${AZURE_DEVOPS_TOKEN}" | base64)" \
+          -H "Content-Type: application/json" \
+          -o /tmp/pr_resp.json \
+          -w "%{http_code}" \
+          -X POST \
+          -d "$JSON_PAYLOAD" \
+          "$PR_API_URL" || true)"
+
+        echo "[INFO] HTTP status: $HTTP_CODE"
+        echo "[INFO] Response:"
+        cat /tmp/pr_resp.json || true
+        echo
+
+        case "$HTTP_CODE" in
+          2*)
+            echo "[INFO] PR created successfully."
+            ;;
+          401)
+            echo "[ERROR] 401 Unauthorized. PAT is invalid/expired, lacks permissions, or ADO expects different auth settings."
+            exit 1
+            ;;
+          *)
+            echo "[ERROR] PR creation failed with HTTP $HTTP_CODE"
+            exit 1
+            ;;
+        esac
+
+  results:
+    - name: commit
+      description: The SHA of the latest commit.
+    - name: committer-date
+      description: The epoch timestamp of the latest commit.
