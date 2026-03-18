@@ -1,0 +1,14 @@
+apiVersion: triggers.tekton.dev/v1alpha1
+kind: TriggerBinding
+metadata:
+  name: frontend-trigger-binding
+spec:
+  params:
+    - name: git-revision
+      value: $(body.resource.lastMergeSourceCommit.commitId)
+    - name: repo-url
+      value: $(extensions.repo-url)
+    - name: repo-name
+      value: $(extensions.repo-name)
+    - name: branch-name
+      value: $(extensions.branch-name)
