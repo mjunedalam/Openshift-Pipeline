@@ -1,0 +1,28 @@
+apiVersion: triggers.tekton.dev/v1beta1
+kind: Trigger
+metadata:
+  name: frontend-build-trigger
+spec:
+  serviceAccountName: pipeline
+  interceptors:
+    - ref:
+        kind: ClusterInterceptor
+        name: cel
+      params:
+        - name: "filter"
+          value:  |
+            string(base64.decode(header.canonical('Authorization').replace('Basic ', ''))).compareSecret('X-Auth', 'secure-pipeline-credentials') &&
+            ((body.eventType == 'git.pullrequest.updated' || body.eventType == 'git.pullrequest.created') 
+            && body.resource.targetRefName.split('/')[2] ==  'develop')
+        - name: "overlays"
+          value:
+          - expression: "body.resource.targetRefName.split('/')[2]"
+            key: branch-name
+          - expression: 'body.resource.repository.name.lowerAscii().replace(''_'' , ''-'')'
+            key: repo-name
+          - expression: 'body.resource.repository.sshUrl.replace(''eccdevops'' , ''eccdevops.enp.aramco.com.sa'')'
+            key: repo-url
+  bindings:
+    - ref: frontend-trigger-binding
+  template:
+    ref: frontend-build-trigger-template
