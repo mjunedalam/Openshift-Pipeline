@@ -1,0 +1,41 @@
+apiVersion: triggers.tekton.dev/v1alpha1
+kind: TriggerTemplate
+metadata:
+  name: frontend-build-trigger-template
+spec:
+  params:
+    - description: git revision
+      name: git-revision
+    - description: repo url
+      name: repo-url
+    - description: repo name
+      name: repo-name
+    - description: branch name
+      name: branch-name
+  resourcetemplates:
+    - apiVersion: tekton.dev/v1beta1
+      kind: PipelineRun
+      metadata:
+        generateName: $(tt.params.repo-name)-$(tt.params.branch-name)-
+      spec:
+        params:
+          - name: git-revision
+            value: $(tt.params.git-revision)
+          - name: repo-url
+            value: $(tt.params.repo-url)
+          - name: repo-name
+            value: $(tt.params.repo-name)
+          - name: branch-name
+            value: $(tt.params.branch-name)
+        pipelineRef:
+          name: frontend-build-pipeline
+        workspaces:
+          - name: npm-cache
+            persistentVolumeClaim:
+              claimName: $(tt.params.repo-name)-npm-pvc
+          - name: source
+            persistentVolumeClaim:
+              claimName: $(tt.params.repo-name)-source-pvc
+          - name: npmrc
+            secret:
+              secretName: npmrc
